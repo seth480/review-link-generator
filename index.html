@@ -42,6 +42,22 @@
   </div>
 
   <script>
+    // ─── Maps JS API setup ────────────────────────────────────────────────────
+    window.mapsReady = false;
+    function onMapsLoad() { window.mapsReady = true; }
+
+    function waitForMaps(timeout = 6000) {
+      if (window.mapsReady) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const start = Date.now();
+        const check = setInterval(() => {
+          if (window.mapsReady) { clearInterval(check); resolve(true); }
+          if (Date.now() - start > timeout) { clearInterval(check); resolve(false); }
+        }, 100);
+      });
+    }
+
+    // ─── Main search flow ─────────────────────────────────────────────────────
     async function searchBusiness() {
       const name = document.getElementById('business-name').value.trim();
       const location = document.getElementById('location').value.trim();
@@ -56,24 +72,28 @@
 
       const queries = buildQueryFallbacks(name, location);
 
+      // Step 1: REST Places API (server-side, key hidden)
       for (const query of queries) {
-        const results = await callSearchAPI(query);
-        if (results === null) {
-          showError('Something went wrong. Please try again.');
-          setLoading(false);
-          return;
-        }
-        if (results.length > 0) {
-          setLoading(false);
-          displayResults(results, name);
-          return;
+        const results = await callRestAPI(query);
+        if (results === null) { setLoading(false); showError('Something went wrong. Please try again.'); return; }
+        if (results.length > 0) { setLoading(false); displayResults(results, name); return; }
+      }
+
+      // Step 2: Maps JavaScript API (broader index, finds SABs)
+      const mapsLoaded = await waitForMaps();
+      if (mapsLoaded) {
+        for (const query of queries) {
+          const results = await callMapsJsAPI(query);
+          if (results.length > 0) { setLoading(false); displayResults(results, name); return; }
         }
       }
 
+      // Step 3: Manual entry fallback
       setLoading(false);
-      showNoResults(name);
+      showManualEntry(name);
     }
 
+    // ─── Query builder ────────────────────────────────────────────────────────
     function buildQueryFallbacks(name, location) {
       const queries = [];
       const cleanName = name.replace(/\b(LLC|Inc|Co|Corp|Ltd|DBA)\b\.?/gi, '').trim();
@@ -81,7 +101,6 @@
       if (location) {
         queries.push(`${name} ${location}`);
         if (cleanName !== name) queries.push(`${cleanName} ${location}`);
-
         if (location.includes(',')) {
           const state = location.split(',')[1].trim();
           queries.push(`${name} ${state}`);
@@ -94,7 +113,8 @@
       return [...new Set(queries)];
     }
 
-    async function callSearchAPI(query) {
+    // ─── Step 1: REST API ─────────────────────────────────────────────────────
+    async function callRestAPI(query) {
       try {
         const response = await fetch(`/search?query=${encodeURIComponent(query)}`);
         if (!response.ok) return null;
@@ -107,31 +127,48 @@
       }
     }
 
+    // ─── Step 2: Maps JS API ──────────────────────────────────────────────────
+    function callMapsJsAPI(query) {
+      return new Promise((resolve) => {
+        try {
+          const div = document.createElement('div');
+          const service = new google.maps.places.PlacesService(div);
+          service.textSearch({ query }, (results, status) => {
+            if (status === google.maps.places.PlacesServiceStatus.OK && results) {
+              resolve(results.map(r => ({
+                place_id: r.place_id,
+                name: r.name,
+                formatted_address: r.formatted_address || ''
+              })));
+            } else {
+              resolve([]);
+            }
+          });
+        } catch {
+          resolve([]);
+        }
+      });
+    }
+
+    // ─── Display results ──────────────────────────────────────────────────────
     function displayResults(results, originalName) {
       const area = document.getElementById('results-area');
-
       if (results.length === 1) {
         area.innerHTML = buildSingleResult(results[0]);
       } else {
-        const filtered = results.slice(0, 5);
-        area.innerHTML = buildMultipleResults(filtered, originalName);
+        area.innerHTML = buildMultipleResults(results.slice(0, 5));
       }
     }
 
     function buildSingleResult(place) {
       const reviewLink = `https://search.google.com/local/writereview?placeid=${place.place_id}`;
       const addressLine = place.formatted_address
-        ? `<p class="address">${place.formatted_address}</p>`
-        : '';
-
+        ? `<p class="address">${escapeHtml(place.formatted_address)}</p>` : '';
       return `
         <div class="card result-card">
-          <div class="result-found">
-            <span class="check">&#10003;</span> Business found
-          </div>
+          <div class="result-found"><span class="check">&#10003;</span> Business found</div>
           <h2 class="place-name">${escapeHtml(place.name)}</h2>
           ${addressLine}
-
           <div class="info-block">
             <label>Place ID</label>
             <div class="copy-row">
@@ -139,7 +176,6 @@
               <button class="copy-btn" onclick="copyText('place-id-value', this)">Copy</button>
             </div>
           </div>
-
           <div class="info-block">
             <label>Review Link</label>
             <div class="copy-row">
@@ -147,53 +183,43 @@
               <button class="copy-btn" onclick="copyText('review-link-value', this)">Copy</button>
             </div>
           </div>
-
           <a class="open-link-btn" href="${reviewLink}" target="_blank" rel="noopener">
             Open Review Link &rarr;
           </a>
-        </div>
-      `;
+        </div>`;
     }
 
-    function buildMultipleResults(results, originalName) {
+    function buildMultipleResults(results) {
       const cards = results.map(place => {
-        const reviewLink = `https://search.google.com/local/writereview?placeid=${place.place_id}`;
         const addressLine = place.formatted_address
-          ? `<p class="address">${place.formatted_address}</p>`
-          : '';
+          ? `<p class="address">${escapeHtml(place.formatted_address)}</p>` : '';
         return `
           <div class="multi-result">
             <div class="multi-result-info">
               <strong>${escapeHtml(place.name)}</strong>
               ${addressLine}
             </div>
-            <button class="select-btn" onclick="selectPlace('${place.place_id}', '${escapeHtml(place.name)}', '${escapeHtml(place.formatted_address || '')}')">
+            <button class="select-btn" onclick="selectPlace('${place.place_id}', \`${escapeHtml(place.name)}\`, \`${escapeHtml(place.formatted_address || '')}\`)">
               This is mine
             </button>
-          </div>
-        `;
+          </div>`;
       }).join('');
-
       return `
         <div class="card result-card">
           <p class="multi-header">We found a few matches. Which one is your business?</p>
           <div class="multi-list">${cards}</div>
-        </div>
-      `;
+          <button class="cant-find-btn" onclick="showManualEntry('')">I don&rsquo;t see my business</button>
+        </div>`;
     }
 
     function selectPlace(placeId, name, address) {
       const reviewLink = `https://search.google.com/local/writereview?placeid=${placeId}`;
       const addressLine = address ? `<p class="address">${escapeHtml(address)}</p>` : '';
-
       document.getElementById('results-area').innerHTML = `
         <div class="card result-card">
-          <div class="result-found">
-            <span class="check">&#10003;</span> Business selected
-          </div>
+          <div class="result-found"><span class="check">&#10003;</span> Business selected</div>
           <h2 class="place-name">${escapeHtml(name)}</h2>
           ${addressLine}
-
           <div class="info-block">
             <label>Place ID</label>
             <div class="copy-row">
@@ -201,7 +227,6 @@
               <button class="copy-btn" onclick="copyText('place-id-value', this)">Copy</button>
             </div>
           </div>
-
           <div class="info-block">
             <label>Review Link</label>
             <div class="copy-row">
@@ -209,45 +234,85 @@
               <button class="copy-btn" onclick="copyText('review-link-value', this)">Copy</button>
             </div>
           </div>
-
           <a class="open-link-btn" href="${reviewLink}" target="_blank" rel="noopener">
             Open Review Link &rarr;
           </a>
-        </div>
-      `;
+        </div>`;
     }
 
+    // ─── Step 3: Manual entry ─────────────────────────────────────────────────
+    function showManualEntry(name) {
+      const intro = name
+        ? `<p class="no-results-title">We couldn&rsquo;t find &ldquo;${escapeHtml(name)}&rdquo; automatically.</p>
+           <p class="no-results-sub">Find your Place ID using the steps below, then paste it here to generate your link.</p>`
+        : `<p class="no-results-title">Enter your Place ID manually</p>
+           <p class="no-results-sub">Follow the steps below to find it, then paste it here.</p>`;
+      document.getElementById('results-area').innerHTML = `
+        <div class="card result-card">
+          ${intro}
+          <ol class="manual-steps">
+            <li>Go to <a href="https://www.google.com/maps" target="_blank" rel="noopener">Google Maps</a> and search your exact business name</li>
+            <li>Click your business listing in the results</li>
+            <li>Look at the URL in your browser &mdash; find the part that starts with <code>1s</code> followed by <code>ChIJ...</code></li>
+            <li>Copy everything from <code>ChIJ</code> up to the next <code>!</code> or end of that segment</li>
+          </ol>
+          <div class="manual-entry">
+            <div class="form-group">
+              <label for="manual-place-id">Paste your Place ID here</label>
+              <input type="text" id="manual-place-id" placeholder="ChIJ..." autocomplete="off" />
+            </div>
+            <button id="manual-btn" onclick="generateFromManualId()">Generate Review Link</button>
+          </div>
+        </div>`;
+
+      document.getElementById('manual-place-id').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') generateFromManualId();
+      });
+    }
+
+    function generateFromManualId() {
+      const placeId = document.getElementById('manual-place-id').value.trim();
+      if (!placeId) {
+        document.getElementById('manual-place-id').style.borderColor = '#ef4444';
+        return;
+      }
+      const reviewLink = `https://search.google.com/local/writereview?placeid=${placeId}`;
+      document.getElementById('results-area').innerHTML = `
+        <div class="card result-card">
+          <div class="result-found"><span class="check">&#10003;</span> Review link ready</div>
+          <div class="info-block" style="margin-top: 16px;">
+            <label>Place ID</label>
+            <div class="copy-row">
+              <code id="place-id-value">${escapeHtml(placeId)}</code>
+              <button class="copy-btn" onclick="copyText('place-id-value', this)">Copy</button>
+            </div>
+          </div>
+          <div class="info-block">
+            <label>Review Link</label>
+            <div class="copy-row">
+              <code id="review-link-value">${reviewLink}</code>
+              <button class="copy-btn" onclick="copyText('review-link-value', this)">Copy</button>
+            </div>
+          </div>
+          <a class="open-link-btn" href="${reviewLink}" target="_blank" rel="noopener">
+            Open Review Link &rarr;
+          </a>
+        </div>`;
+    }
+
+    // ─── Utilities ────────────────────────────────────────────────────────────
     function copyText(elementId, btn) {
       const text = document.getElementById(elementId).textContent;
       navigator.clipboard.writeText(text).then(() => {
         btn.textContent = 'Copied!';
         btn.classList.add('copied');
-        setTimeout(() => {
-          btn.textContent = 'Copy';
-          btn.classList.remove('copied');
-        }, 2000);
+        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
       });
     }
 
     function showError(message) {
-      document.getElementById('results-area').innerHTML = `
-        <div class="message error">${message}</div>
-      `;
-    }
-
-    function showNoResults(name) {
-      document.getElementById('results-area').innerHTML = `
-        <div class="card result-card">
-          <p class="no-results-title">No results found for &ldquo;${escapeHtml(name)}&rdquo;</p>
-          <p class="no-results-sub">Try these steps to find your Place ID manually:</p>
-          <ol class="manual-steps">
-            <li>Go to <strong>Google Maps</strong> and search your business name</li>
-            <li>Click your business listing in the results</li>
-            <li>Look at the URL &mdash; copy the section after <code>1s</code> (it starts with <code>ChIJ</code>)</li>
-            <li>Your review link will be:<br><code>https://search.google.com/local/writereview?placeid=YOUR_PLACE_ID</code></li>
-          </ol>
-        </div>
-      `;
+      document.getElementById('results-area').innerHTML =
+        `<div class="message error">${message}</div>`;
     }
 
     function setLoading(on) {
@@ -267,9 +332,14 @@
     }
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') searchBusiness();
+      if (e.key === 'Enter' && document.activeElement.id !== 'manual-place-id') {
+        searchBusiness();
+      }
     });
   </script>
+
+  <!-- Maps JS API: replace AIzaSyB5Ro3-5Z6lz8Q8QhmkV4xETYpyDMjiqJc with your domain-restricted key -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB5Ro3-5Z6lz8Q8QhmkV4xETYpyDMjiqJc&libraries=places&callback=onMapsLoad" async defer></script>
 
 </body>
 </html>
