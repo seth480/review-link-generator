@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Google Review Link Generator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div class="container">
+    <div class="header">
+      <h1>Google Review Link Generator</h1>
+      <p>Find your Google Place ID and get a direct link customers can click to leave a review.</p>
+    </div>
+
+    <div class="card">
+      <div class="form-group">
+        <label for="business-name">Business Name <span class="required">*</span></label>
+        <input
+          type="text"
+          id="business-name"
+          placeholder="e.g. Crawlspace Solutions LLC"
+          autocomplete="off"
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="location">City &amp; State <span class="optional">(recommended)</span></label>
+        <input
+          type="text"
+          id="location"
+          placeholder="e.g. Nashville, TN"
+          autocomplete="off"
+        />
+      </div>
+
+      <button id="search-btn" onclick="searchBusiness()">Find My Place ID</button>
+    </div>
+
+    <div id="results-area"></div>
+  </div>
+
+  <script>
+    async function searchBusiness() {
+      const name = document.getElementById('business-name').value.trim();
+      const location = document.getElementById('location').value.trim();
+
+      if (!name) {
+        showError('Please enter your business name.');
+        return;
+      }
+
+      setLoading(true);
+      clearResults();
+
+      const queries = buildQueryFallbacks(name, location);
+
+      for (const query of queries) {
+        const results = await callSearchAPI(query);
+        if (results === null) {
+          showError('Something went wrong. Please try again.');
+          setLoading(false);
+          return;
+        }
+        if (results.length > 0) {
+          setLoading(false);
+          displayResults(results, name);
+          return;
+        }
+      }
+
+      setLoading(false);
+      showNoResults(name);
+    }
+
+    function buildQueryFallbacks(name, location) {
+      const queries = [];
+      const cleanName = name.replace(/\b(LLC|Inc|Co|Corp|Ltd|DBA)\b\.?/gi, '').trim();
+
+      if (location) {
+        queries.push(`${name} ${location}`);
+        if (cleanName !== name) queries.push(`${cleanName} ${location}`);
+
+        if (location.includes(',')) {
+          const state = location.split(',')[1].trim();
+          queries.push(`${name} ${state}`);
+        }
+      }
+
+      queries.push(name);
+      if (cleanName !== name) queries.push(cleanName);
+
+      return [...new Set(queries)];
+    }
+
+    async function callSearchAPI(query) {
+      try {
+        const response = await fetch(`/search?query=${encodeURIComponent(query)}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data.status === 'OK') return data.results;
+        if (data.status === 'ZERO_RESULTS') return [];
+        return null;
+      } catch {
+        return null;
+      }
+    }
+
+    function displayResults(results, originalName) {
+      const area = document.getElementById('results-area');
+
+      if (results.length === 1) {
+        area.innerHTML = buildSingleResult(results[0]);
+      } else {
+        const filtered = results.slice(0, 5);
+        area.innerHTML = buildMultipleResults(filtered, originalName);
+      }
+    }
+
+    function buildSingleResult(place) {
+      const reviewLink = `https://search.google.com/local/writereview?placeid=${place.place_id}`;
+      const addressLine = place.formatted_address
+        ? `<p class="address">${place.formatted_address}</p>`
+        : '';
+
+      return `
+        <div class="card result-card">
+          <div class="result-found">
+            <span class="check">&#10003;</span> Business found
+          </div>
+          <h2 class="place-name">${escapeHtml(place.name)}</h2>
+          ${addressLine}
+
+          <div class="info-block">
+            <label>Place ID</label>
+            <div class="copy-row">
+              <code id="place-id-value">${place.place_id}</code>
+              <button class="copy-btn" onclick="copyText('place-id-value', this)">Copy</button>
+            </div>
+          </div>
+
+          <div class="info-block">
+            <label>Review Link</label>
+            <div class="copy-row">
+              <code id="review-link-value">${reviewLink}</code>
+              <button class="copy-btn" onclick="copyText('review-link-value', this)">Copy</button>
+            </div>
+          </div>
+
+          <a class="open-link-btn" href="${reviewLink}" target="_blank" rel="noopener">
+            Open Review Link &rarr;
+          </a>
+        </div>
+      `;
+    }
+
+    function buildMultipleResults(results, originalName) {
+      const cards = results.map(place => {
+        const reviewLink = `https://search.google.com/local/writereview?placeid=${place.place_id}`;
+        const addressLine = place.formatted_address
+          ? `<p class="address">${place.formatted_address}</p>`
+          : '';
+        return `
+          <div class="multi-result">
+            <div class="multi-result-info">
+              <strong>${escapeHtml(place.name)}</strong>
+              ${addressLine}
+            </div>
+            <button class="select-btn" onclick="selectPlace('${place.place_id}', '${escapeHtml(place.name)}', '${escapeHtml(place.formatted_address || '')}')">
+              This is mine
+            </button>
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="card result-card">
+          <p class="multi-header">We found a few matches. Which one is your business?</p>
+          <div class="multi-list">${cards}</div>
+        </div>
+      `;
+    }
+
+    function selectPlace(placeId, name, address) {
+      const reviewLink = `https://search.google.com/local/writereview?placeid=${placeId}`;
+      const addressLine = address ? `<p class="address">${escapeHtml(address)}</p>` : '';
+
+      document.getElementById('results-area').innerHTML = `
+        <div class="card result-card">
+          <div class="result-found">
+            <span class="check">&#10003;</span> Business selected
+          </div>
+          <h2 class="place-name">${escapeHtml(name)}</h2>
+          ${addressLine}
+
+          <div class="info-block">
+            <label>Place ID</label>
+            <div class="copy-row">
+              <code id="place-id-value">${placeId}</code>
+              <button class="copy-btn" onclick="copyText('place-id-value', this)">Copy</button>
+            </div>
+          </div>
+
+          <div class="info-block">
+            <label>Review Link</label>
+            <div class="copy-row">
+              <code id="review-link-value">${reviewLink}</code>
+              <button class="copy-btn" onclick="copyText('review-link-value', this)">Copy</button>
+            </div>
+          </div>
+
+          <a class="open-link-btn" href="${reviewLink}" target="_blank" rel="noopener">
+            Open Review Link &rarr;
+          </a>
+        </div>
+      `;
+    }
+
+    function copyText(elementId, btn) {
+      const text = document.getElementById(elementId).textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copied');
+        }, 2000);
+      });
+    }
+
+    function showError(message) {
+      document.getElementById('results-area').innerHTML = `
+        <div class="message error">${message}</div>
+      `;
+    }
+
+    function showNoResults(name) {
+      document.getElementById('results-area').innerHTML = `
+        <div class="card result-card">
+          <p class="no-results-title">No results found for &ldquo;${escapeHtml(name)}&rdquo;</p>
+          <p class="no-results-sub">Try these steps to find your Place ID manually:</p>
+          <ol class="manual-steps">
+            <li>Go to <strong>Google Maps</strong> and search your business name</li>
+            <li>Click your business listing in the results</li>
+            <li>Look at the URL &mdash; copy the section after <code>1s</code> (it starts with <code>ChIJ</code>)</li>
+            <li>Your review link will be:<br><code>https://search.google.com/local/writereview?placeid=YOUR_PLACE_ID</code></li>
+          </ol>
+        </div>
+      `;
+    }
+
+    function setLoading(on) {
+      const btn = document.getElementById('search-btn');
+      btn.disabled = on;
+      btn.textContent = on ? 'Searching...' : 'Find My Place ID';
+    }
+
+    function clearResults() {
+      document.getElementById('results-area').innerHTML = '';
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') searchBusiness();
+    });
+  </script>
+
+</body>
+</html>
